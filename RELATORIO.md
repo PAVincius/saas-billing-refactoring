@@ -1,7 +1,7 @@
 # Relatório Técnico: Refatoração do núcleo financeiro da SaaS Billing Co.
 
 Implantação e Entrega de Software, 2026/2, UFG/INF.
-Dupla: _preencher nomes_
+Dupla: Vinícius Prates Araújo (matrícula 201910912)
 
 Código analisado: `SubscriptionBillingService` (commit `3dfd8dd`, arquivo original sem alterações).
 Todas as referências de linha da seção 1 apontam para esse commit.
