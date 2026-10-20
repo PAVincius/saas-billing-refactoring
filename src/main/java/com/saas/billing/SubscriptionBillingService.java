@@ -1,5 +1,8 @@
 package com.saas.billing;
 
+import com.saas.billing.domain.BillingCommand;
+import com.saas.billing.domain.Money;
+import java.math.BigDecimal;
 import java.sql.Connection;
 import java.sql.DriverManager;
 import java.sql.PreparedStatement;
@@ -15,46 +18,15 @@ public class SubscriptionBillingService {
     private static final String DB_USER = "admin";
     private static final String DB_PASS = "admin123";
 
-    public List<String> processMonthlyBilling(String customerId, String planType, double basePrice, 
-                                             String signupDateStr, int overdueDays, String promoCode, 
-                                             boolean isNonProfit, String paymentCardToken) {
+    public List<String> processMonthlyBilling(BillingCommand command) {
 
         List<String> logs = new ArrayList<>();
-        
-        LocalDate signupDate = LocalDate.parse(signupDateStr);
+
         LocalDate today = LocalDate.now();
 
-        int monthsActive = (today.getYear() - signupDate.getYear()) * 12 + (today.getMonthValue() - signupDate.getMonthValue());
+        Money calculatedPrice = calculatePrice(command, today);
 
-        double calculatedPrice = basePrice;
-
-        if (monthsActive > 24) {
-            calculatedPrice = calculatedPrice - (basePrice * 0.15); // 15% após 2 anos
-        } else if (monthsActive > 12) {
-            calculatedPrice = calculatedPrice - (basePrice * 0.10); // 10% após 1 ano
-        }
-
-        if (isNonProfit) {
-            calculatedPrice = calculatedPrice * 0.70; // 30% off para ONGs
-        }
-
-        if (promoCode != null && !promoCode.trim().isEmpty()) {
-            if (promoCode.equalsIgnoreCase("BLACKFRIDAY") && today.getMonthValue() == 11) {
-                calculatedPrice = calculatedPrice - 30.0;
-            } else if (promoCode.equalsIgnoreCase("WELCOME10") && monthsActive <= 1) {
-                calculatedPrice = calculatedPrice * 0.90;
-            }
-        }
-
-        if (overdueDays > 0) {
-            double penalty = calculatedPrice * 0.02;
-            double dailyInterest = (calculatedPrice * 0.001) * overdueDays;
-            calculatedPrice = calculatedPrice + penalty + dailyInterest;
-        }
-
-        if (calculatedPrice < 0) {
-            calculatedPrice = 0.0;
-        }
+        String customerId = command.customerId();
 
         try (Connection conn = DriverManager.getConnection(DB_URL, DB_USER, DB_PASS)) {
             String sqlCustomer = "SELECT email, status FROM customers WHERE id = ?";
@@ -71,6 +43,7 @@ public class SubscriptionBillingService {
                     return logs;
                 }
 
+                String paymentCardToken = command.paymentCardToken();
                 boolean paymentSuccess = false;
                 if (paymentCardToken != null && paymentCardToken.startsWith("tok_")) {
                     paymentSuccess = true;
@@ -82,7 +55,7 @@ public class SubscriptionBillingService {
                 String sqlInvoice = "INSERT INTO invoices(customer_id, amount, status, created_at) VALUES (?, ?, ?, NOW())";
                 PreparedStatement stmtInvoice = conn.prepareStatement(sqlInvoice);
                 stmtInvoice.setString(1, customerId);
-                stmtInvoice.setDouble(2, calculatedPrice);
+                stmtInvoice.setBigDecimal(2, calculatedPrice.amount());
                 stmtInvoice.setString(3, paymentSuccess ? "PAID" : "FAILED");
                 stmtInvoice.executeUpdate();
 
@@ -102,5 +75,40 @@ public class SubscriptionBillingService {
         }
 
         return logs;
+    }
+
+    private Money calculatePrice(BillingCommand command, LocalDate today) {
+        LocalDate signupDate = command.signupDate();
+        int monthsActive = (today.getYear() - signupDate.getYear()) * 12 + (today.getMonthValue() - signupDate.getMonthValue());
+
+        Money basePrice = command.basePrice();
+        Money calculatedPrice = basePrice;
+
+        if (monthsActive > 24) {
+            calculatedPrice = calculatedPrice.minus(basePrice.times(new BigDecimal("0.15"))); // 15% após 2 anos
+        } else if (monthsActive > 12) {
+            calculatedPrice = calculatedPrice.minus(basePrice.times(new BigDecimal("0.10"))); // 10% após 1 ano
+        }
+
+        if (command.nonProfit()) {
+            calculatedPrice = calculatedPrice.times(new BigDecimal("0.70")); // 30% off para ONGs
+        }
+
+        if (command.hasPromoCode()) {
+            String promoCode = command.promoCode();
+            if (promoCode.equalsIgnoreCase("BLACKFRIDAY") && today.getMonthValue() == 11) {
+                calculatedPrice = calculatedPrice.minus(Money.of("30.00"));
+            } else if (promoCode.equalsIgnoreCase("WELCOME10") && monthsActive <= 1) {
+                calculatedPrice = calculatedPrice.times(new BigDecimal("0.90"));
+            }
+        }
+
+        if (command.overdueDays() > 0) {
+            Money penalty = calculatedPrice.times(new BigDecimal("0.02"));
+            Money dailyInterest = calculatedPrice.times(new BigDecimal("0.001").multiply(BigDecimal.valueOf(command.overdueDays())));
+            calculatedPrice = calculatedPrice.plus(penalty).plus(dailyInterest);
+        }
+
+        return calculatedPrice.orZeroIfNegative();
     }
 }
