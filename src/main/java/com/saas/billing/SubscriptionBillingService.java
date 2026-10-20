@@ -1,74 +1,70 @@
 package com.saas.billing;
 
 import com.saas.billing.domain.BillingCommand;
+import com.saas.billing.domain.Customer;
+import com.saas.billing.domain.InvoiceStatus;
 import com.saas.billing.domain.Money;
+import com.saas.billing.port.CustomerRepository;
+import com.saas.billing.port.InvoiceRepository;
+import com.saas.billing.port.NotificationService;
+import com.saas.billing.port.PaymentGateway;
 import java.math.BigDecimal;
-import java.sql.Connection;
-import java.sql.DriverManager;
-import java.sql.PreparedStatement;
-import java.sql.ResultSet;
+import java.time.Clock;
 import java.time.LocalDate;
 import java.util.ArrayList;
 import java.util.List;
-import org.apache.commons.mail.SimpleEmail;
+import java.util.Optional;
 
 public class SubscriptionBillingService {
 
-    private static final String DB_URL = "jdbc:postgresql://localhost:5432/saas_db";
-    private static final String DB_USER = "admin";
-    private static final String DB_PASS = "admin123";
+    private final CustomerRepository customers;
+    private final InvoiceRepository invoices;
+    private final PaymentGateway payments;
+    private final NotificationService notifications;
+    private final Clock clock;
+
+    public SubscriptionBillingService(CustomerRepository customers, InvoiceRepository invoices,
+                                      PaymentGateway payments, NotificationService notifications, Clock clock) {
+        this.customers = customers;
+        this.invoices = invoices;
+        this.payments = payments;
+        this.notifications = notifications;
+        this.clock = clock;
+    }
 
     public List<String> processMonthlyBilling(BillingCommand command) {
 
         List<String> logs = new ArrayList<>();
 
-        LocalDate today = LocalDate.now();
+        LocalDate today = LocalDate.now(clock);
 
         Money calculatedPrice = calculatePrice(command, today);
 
         String customerId = command.customerId();
 
-        try (Connection conn = DriverManager.getConnection(DB_URL, DB_USER, DB_PASS)) {
-            String sqlCustomer = "SELECT email, status FROM customers WHERE id = ?";
-            PreparedStatement stmt = conn.prepareStatement(sqlCustomer);
-            stmt.setString(1, customerId);
-            ResultSet rs = stmt.executeQuery();
+        try {
+            Optional<Customer> found = customers.findById(customerId);
 
-            if (rs.next()) {
-                String email = rs.getString("email");
-                String status = rs.getString("status");
+            if (found.isPresent()) {
+                Customer customer = found.get();
 
-                if (!"ACTIVE".equalsIgnoreCase(status)) {
+                if (!customer.isActive()) {
                     logs.add("Cliente inativo. Cobrança cancelada: " + customerId);
                     return logs;
                 }
 
-                String paymentCardToken = command.paymentCardToken();
-                boolean paymentSuccess = false;
-                if (paymentCardToken != null && paymentCardToken.startsWith("tok_")) {
-                    paymentSuccess = true;
+                boolean paymentSuccess = payments.charge(command.paymentCardToken(), calculatedPrice);
+                if (paymentSuccess) {
                     logs.add("Pagamento processado com sucesso: R$ " + calculatedPrice);
                 } else {
                     logs.add("Falha no pagamento do cartão para: " + customerId);
                 }
 
-                String sqlInvoice = "INSERT INTO invoices(customer_id, amount, status, created_at) VALUES (?, ?, ?, NOW())";
-                PreparedStatement stmtInvoice = conn.prepareStatement(sqlInvoice);
-                stmtInvoice.setString(1, customerId);
-                stmtInvoice.setBigDecimal(2, calculatedPrice.amount());
-                stmtInvoice.setString(3, paymentSuccess ? "PAID" : "FAILED");
-                stmtInvoice.executeUpdate();
+                invoices.save(customerId, calculatedPrice, paymentSuccess ? InvoiceStatus.PAID : InvoiceStatus.FAILED);
 
-                SimpleEmail emailSender = new SimpleEmail();
-                emailSender.setHostName("smtp.empresa.com");
-                emailSender.setSmtpPort(587);
-                emailSender.setFrom("billing@empresa.com");
-                emailSender.setSubject("Sua Fatura Mensal");
-                emailSender.setMsg("Olá! Sua fatura foi processada no valor de R$ " + calculatedPrice);
-                emailSender.addTo(email);
-                // emailSender.send();
+                notifications.sendInvoice(customer.email(), calculatedPrice);
 
-                logs.add("E-mail disparado para: " + email);
+                logs.add("E-mail disparado para: " + customer.email());
             }
         } catch (Exception e) {
             logs.add("Erro fatal no processamento: " + e.getMessage());
