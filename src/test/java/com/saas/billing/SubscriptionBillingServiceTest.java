@@ -1,6 +1,7 @@
 package com.saas.billing;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import com.saas.billing.adapter.TokenPrefixPaymentGateway;
@@ -143,6 +144,16 @@ class SubscriptionBillingServiceTest {
                 "Pagamento processado com sucesso: R$ 100.00",
                 "Erro fatal no processamento: db down"), logs);
         assertTrue(sentEmails.isEmpty());
+    }
+
+    @Test
+    void unexpectedBugsAreNotMaskedAsBillingLogs() {
+        payments = (token, amount) -> {
+            throw new IllegalStateException("bug no gateway");
+        };
+
+        assertThrows(IllegalStateException.class, () -> serviceAt(OCTOBER_20).processMonthlyBilling(simple("tok_1")));
+        assertTrue(savedInvoices.isEmpty());
     }
 
     @Test
